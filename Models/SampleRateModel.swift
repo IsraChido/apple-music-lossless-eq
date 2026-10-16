@@ -46,6 +46,8 @@ final class SampleRateModel: ObservableObject {
     private var latestTrackInfoError: String?
     private var trackInfoFetchInFlight = false
     private var artworkFetchInFlight = false
+    /// The track whose cover the AppleScript fallback still owes us, if any.
+    private var pendingArtworkTitle: String?
 
     /// A log-derived vote, buffered off the main thread before being folded
     /// into `logRateWindow`. See `enqueueLogVote`.
@@ -311,6 +313,7 @@ final class SampleRateModel: ObservableObject {
         artworkTrackTitle = currentTrackTitle
 
         if let data {
+            pendingArtworkTitle = nil
             applyArtwork(data)
             return
         }
@@ -320,15 +323,20 @@ final class SampleRateModel: ObservableObject {
         guard trackChanged else { return }
 
         guard currentTrackTitle != "Not playing" else {
+            pendingArtworkTitle = nil
             applyArtwork(nil)
             return
         }
 
-        fetchArtworkIfNeeded(for: currentTrackTitle)
+        pendingArtworkTitle = currentTrackTitle
+        fetchPendingArtwork()
     }
 
-    private func fetchArtworkIfNeeded(for title: String) {
-        guard !artworkFetchInFlight else { return }
+    /// At most one fetch is in flight. A track change mid-flight does not
+    /// start a second one; the running fetch re-issues itself for the new
+    /// track when it lands, so the new track is never left without a cover.
+    private func fetchPendingArtwork() {
+        guard !artworkFetchInFlight, let title = pendingArtworkTitle else { return }
         artworkFetchInFlight = true
 
         musicController.fetchArtwork { [weak self] data in
@@ -337,7 +345,11 @@ final class SampleRateModel: ObservableObject {
 
             // Drop the result if the track changed while we were fetching;
             // otherwise a slow reply would show the previous cover.
-            guard self.currentTrackTitle == title else { return }
+            guard self.pendingArtworkTitle == title else {
+                self.fetchPendingArtwork()
+                return
+            }
+            self.pendingArtworkTitle = nil
             self.applyArtwork(data)
         }
     }

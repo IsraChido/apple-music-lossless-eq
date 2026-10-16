@@ -15,6 +15,7 @@ final class LogStreamController {
     private var isStopping = false
     private var restartAttempts = 0
     private var restartWorkItem: DispatchWorkItem?
+    private var launchedAt: Date?
 
     var onSampleRate: ((Double, String?) -> Void)?
     var onStatus: ((String) -> Void)?
@@ -29,6 +30,10 @@ final class LogStreamController {
     /// Stop retrying after this many consecutive failures so a permanently
     /// broken `log stream` cannot spawn processes forever.
     private static let maxRestartAttempts = 5
+
+    /// A stream that stays up this long counts as healthy, so its eventual
+    /// exit starts the backoff over instead of using up another attempt.
+    private static let healthyUptime: TimeInterval = 30
 
     // MARK: - Lifecycle
     //
@@ -118,7 +123,7 @@ final class LogStreamController {
         do {
             try proc.run()
             process = proc
-            restartAttempts = 0
+            launchedAt = Date()
             DispatchQueue.main.async { self.onStatus?("Log stream started") }
         } catch {
             process = nil
@@ -134,6 +139,12 @@ final class LogStreamController {
     private func handleStreamEnded() {
         guard !isStopping else { return }
         guard process != nil || outputHandle != nil else { return }
+        // Only a stream that ran for a while resets the budget. Resetting on
+        // every successful `run()` let a `log stream` that exits right after
+        // launch (a rejected predicate, say) respawn every second forever.
+        if let launchedAt, Date().timeIntervalSince(launchedAt) >= Self.healthyUptime {
+            restartAttempts = 0
+        }
         teardownStream()
         scheduleRestart()
     }
@@ -142,8 +153,9 @@ final class LogStreamController {
     private func scheduleRestart() {
         guard !isStopping else { return }
         guard restartAttempts < Self.maxRestartAttempts else {
+            let attempts = restartAttempts
             DispatchQueue.main.async {
-                self.onStatus?("Log stream stopped after \(self.restartAttempts) failed restarts")
+                self.onStatus?("Log stream stopped after \(attempts) failed restarts")
             }
             return
         }
@@ -165,6 +177,7 @@ final class LogStreamController {
         errorHandle?.readabilityHandler = nil
         outputHandle = nil
         errorHandle = nil
+        launchedAt = nil
         buffer.removeAll(keepingCapacity: false)
 
         if let process {
